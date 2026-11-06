@@ -24,7 +24,11 @@ tools)
 sync)
 	mkdir -p "$SRC" && cd "$SRC"
 	repo init -q --depth=1 -u https://github.com/AERA-Recovery/android_manifest.git -b aera-16.0
-	repo sync -q -c -j16 --force-sync --no-clone-bundle --no-tags --optimized-fetch
+	# AOSP (googlesource) rate-limits busy CI IPs (RESOURCE_EXHAUSTED): fewer jobs + resume-retries
+	for try in 1 2 3 4; do
+		repo sync -q -c -j8 --force-sync --no-clone-bundle --no-tags --optimized-fetch && break
+		[ $try = 4 ] && exit 1; echo "sync attempt $try failed, retrying in $((try*60)) s"; sleep $((try*60))
+	done
 	# AERA_ENABLE_WLAN needs it; newer AERA manifests already ship it
 	[ -e external/wpa_supplicant_8/Android.bp ] || git clone -q --depth=1 -b android16-s2-release \
 		https://android.googlesource.com/platform/external/wpa_supplicant_8 external/wpa_supplicant_8

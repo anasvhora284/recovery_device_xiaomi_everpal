@@ -1,0 +1,76 @@
+name: AERA build (everpal)
+
+# Runs when the workflow or the AERA source patches change on this branch.
+# Output: the AERA zip + boot.img as a workflow artifact (patch the installer locally with tools/patch_installer.py).
+on:
+  push:
+    branches: [aera-16.0]
+    paths:
+      - .github/workflows/aera-build.yml
+      - aera-patches/**
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      SRC: /home/runner/aera
+      OUT_DIR: /mnt/out
+      AERA_BUILD_DEVICE: everpal
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /usr/local/share/powershell
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo mkdir -p "$OUT_DIR" && sudo chown runner:runner "$OUT_DIR"
+          sudo fallocate -l 16G /mnt/swap && sudo chmod 600 /mnt/swap && sudo mkswap /mnt/swap >/dev/null && sudo swapon /mnt/swap
+          df -h / /mnt; free -g; nproc
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 \
+            x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
+            python-is-python3 rsync >/dev/null
+          mkdir -p ~/bin && curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo && chmod +x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name ci && git config --global user.email ci@localhost
+
+      - name: Sync AERA source
+        run: |
+          mkdir -p "$SRC" && cd "$SRC"
+          repo init -q --depth=1 -u https://github.com/AERA-Recovery/android_manifest.git -b aera-16.0
+          repo sync -q -c -j16 --force-sync --no-clone-bundle --no-tags --optimized-fetch
+          git clone -q --depth=1 -b android16-s2-release \
+            https://android.googlesource.com/platform/external/wpa_supplicant_8 external/wpa_supplicant_8
+          git clone -q --depth=30 -b "$GITHUB_REF_NAME" "https://github.com/$GITHUB_REPOSITORY" device/xiaomi/everpal
+          git -C device/xiaomi/everpal checkout -q "$GITHUB_SHA"
+          df -h / /mnt
+
+      - name: Apply AERA source patches
+        run: |
+          cd "$SRC"
+          for d in device/xiaomi/everpal/aera-patches/*/; do
+            proj=$(basename "$d" | tr _ /)          # bootable_recovery -> bootable/recovery
+            for p in "$d"*.patch; do echo "== $proj <- $(basename "$p")"; git -C "$proj" apply --verbose "$SRC/$p"; done
+          done
+
+      - name: Build
+        run: |
+          cd "$SRC"
+          source build/envsetup.sh
+          lunch twrp_everpal-bp2a-eng
+          mka adbd bootimage
+          ls -la "$OUT_DIR/target/product/everpal/" | grep -E "\.img|\.zip"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: aera-everpal-${{ github.run_number }}
+          path: |
+            ${{ env.OUT_DIR }}/target/product/everpal/*.zip
+            ${{ env.OUT_DIR }}/target/product/everpal/boot.img
+          if-no-files-found: error
+          retention-days: 14
